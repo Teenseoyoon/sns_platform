@@ -146,7 +146,7 @@ def classify_risk(text):
     text = str(text).strip()
 
     if text == "":
-        return "SAFE"
+        return "SAFE", 0.0
 
     tokenizer, model, device = load_risk_model()
 
@@ -181,14 +181,14 @@ def classify_risk(text):
 
     # 유해 확률이 85% 이상이면 차단
     if risk_probability >= BLOCK_THRESHOLD:
-        return "BLOCK"
+        return "BLOCK", risk_probability
 
     # 유해 확률이 60% 이상이면 검토대기
     if risk_probability >= REVIEW_THRESHOLD:
-        return "REVIEW"
+        return "REVIEW", risk_probability
 
     # 나머지는 안전한 게시물로 처리
-    return "SAFE"
+    return "SAFE", risk_probability
 # =========================
 # 위험도에 따른 게시물 상태 결정
 # =========================
@@ -963,7 +963,7 @@ with tab2:
                 st.warning("내용을 입력하세요.")
             else:
                 post_id = "post_" + datetime.now().strftime("%Y%m%d%H%M%S%f")
-                risk_level = classify_risk(title + " " + content)
+                risk_level, risk_probability = classify_risk(title + " " + content)
                 status = decide_status(risk_level)
                 likes = 0
                 created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -977,7 +977,8 @@ with tab2:
                     risk_level,
                     status,
                     likes,
-                    created_at
+                    created_at,
+                    round(risk_probability, 6)
                 ])
 
                 increase_user_points(users_sheet, selected_user_id, 10)
