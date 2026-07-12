@@ -4,6 +4,9 @@ import pandas as pd
 import time
 import hashlib
 import secrets
+import torch
+
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 
@@ -82,39 +85,110 @@ def clear_sheet_cache(*cache_keys):
             del st.session_state[cache_key]
 
 
+
 # =========================
-# 위험도 분류 함수
+# Transformer 위험도 분류 설정
+# =========================
+
+# 한국어 유해 문장 분류 학습이 완료된 Hugging Face 모델
+MODEL_PATH = "JminJ/kcElectra_base_Bad_Sentence_Classifier"
+
+# 이 모델의 라벨 구조
+# 0 = 유해한 문장
+# 1 = 정상적인 문장
+RISK_LABEL_INDEX = 0
+
+# 유해 확률이 0.60 이상이면 관리자 검토
+REVIEW_THRESHOLD = 0.60
+
+# 유해 확률이 0.85 이상이면 차단
+BLOCK_THRESHOLD = 0.85
+
+
+# =========================
+# Transformer 모델 불러오기
+# 앱이 다시 실행될 때마다 모델을 재로딩하지 않도록 캐시
+# =========================
+@st.cache_resource(
+    show_spinner="게시물 안전성 분석 모델을 불러오는 중입니다..."
+)
+def load_risk_model():
+    tokenizer = AutoTokenizer.from_pretrained(
+        MODEL_PATH
+    )
+
+    model = AutoModelForSequenceClassification.from_pretrained(
+        MODEL_PATH
+    )
+
+    # 추론 모드로 전환
+    model.eval()
+
+    # Streamlit Cloud에서는 일반적으로 CPU를 사용
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    model.to(device)
+
+    return tokenizer, model, device
+
+
+# =========================
+# Transformer 위험도 분류 함수
+#
+# 반환값:
+# SAFE   = 공개
+# REVIEW = 관리자 검토대기
+# BLOCK  = 차단
 # =========================
 def classify_risk(text):
-    text = text.replace(" ", "").lower()
+    text = str(text).strip()
 
-    block_keywords = [
-        "자살", "죽고싶", "죽고싶다", "죽여", "살해", "테러", "폭탄"
-    ]
+    if text == "":
+        return "SAFE"
 
-    review_keywords = [
-        "우울", "괴롭", "힘들", "왕따", "따돌림", "협박", "학폭"
-    ]
+    tokenizer, model, device = load_risk_model()
 
-    support_keywords = [
-        "외롭", "불안", "고민", "스트레스", "속상", "걱정"
-    ]
+    # 제목과 게시물 내용을 Transformer 입력으로 변환
+    inputs = tokenizer(
+        text,
+        return_tensors="pt",
+        truncation=True,
+        max_length=128,
+        padding=False
+    )
 
-    for word in block_keywords:
-        if word in text:
-            return "BLOCK"
+    # 입력 데이터를 모델과 같은 장치로 이동
+    inputs = {
+        key: value.to(device)
+        for key, value in inputs.items()
+    }
 
-    for word in review_keywords:
-        if word in text:
-            return "REVIEW"
+    # 학습하지 않고 분류 결과만 계산
+    with torch.inference_mode():
+        outputs = model(**inputs)
 
-    for word in support_keywords:
-        if word in text:
-            return "SUPPORT"
+        probabilities = torch.softmax(
+            outputs.logits,
+            dim=-1
+        )
 
+    # 0번 라벨인 유해 문장 확률 추출
+    risk_probability = probabilities[
+        0
+    ][RISK_LABEL_INDEX].item()
+
+    # 유해 확률이 85% 이상이면 차단
+    if risk_probability >= BLOCK_THRESHOLD:
+        return "BLOCK"
+
+    # 유해 확률이 60% 이상이면 검토대기
+    if risk_probability >= REVIEW_THRESHOLD:
+        return "REVIEW"
+
+    # 나머지는 안전한 게시물로 처리
     return "SAFE"
-
-
 # =========================
 # 위험도에 따른 게시물 상태 결정
 # =========================
